@@ -1,0 +1,324 @@
+---
+title: "Time Series forecasting of the USD/AUD exchange rate"
+author: "Aiden"
+output: 
+  html_document:
+  toc: TRUE
+  toc_title: "Table of Contents"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+# Background
+The USD/AUD exchange rate represents the value of one US dollar (USD) in terms of Australian dollars (AUD). Interest rate differentials refer to the difference in interest rates between two countries. These differentials are a major determinant of exchange rate movements through mechanisms like the interest rate parity (IRP). There some potential instances which affect the exchange rate via interest rate such as: 
+
+Rising Australian Interest Rates Relative to the US: The AUD tends to appreciate against the USD as investors move capital to take advantage of higher returns in Australian markets.
+
+Rising US Interest Rates Relative to Australia: The USD appreciates against the AUD, reflecting increased demand for USD-denominated assets.
+
+Global Economic Uncertainty: In times of market turbulence, the USD often strengthens as a safe-haven currency, even if interest rates in the US are lower than in Australia.
+
+## Purpose
+I have always had an interest in macroeconomics, particularly in international finance (as per my Economics major at university). The intention behind this project is to explore more about the behaviour of exchanges rates and albeit practice time series modelling on real datasets. This document will be analysing the dataset of the monthly USD/AUD exchange rate from January 1971 to November 2024. 
+
+Source: https://fred.stlouisfed.org/series/EXUSAL
+
+# Importing relevant libaries
+```{r, message=FALSE, warning=FALSE}
+#Importing necessary libraries
+library(tsibble)
+library(tidyverse)
+library(fable)
+library(feasts)
+library(tseries)
+```
+
+# Reading in the data
+```{r}
+data = read.csv("EXUSAL.csv", header=TRUE)
+
+data$observation_date = yearmonth(data$observation_date) #Adjusting the time index to a year-month format
+
+US.AUexchangerate = as_tsibble(data, index = observation_date) #Making a tsibble based on the data
+```
+
+# Time plots
+
+Let's take a look at the time plot
+```{r}
+US.AUexchangerate %>% 
+  autoplot(EXUSAL) +
+  labs(y="US Dollar per Australian Dollar", x = "Year", title = "U.S. Dollars to Australian Dollar Spot Exchange Rate")
+```
+
+A decreasing trend is apparent. There seems to be some cyclicality in the U.S. Dollar to Australian Dollar spot exchange rate shown in this chart. Over time, you can observe repeating patterns of rise and fall in the exchange rate, although the periodicity is not consistent.
+
+Let's look at the relationship between the exchange rate and previous versions of the exchange rate at previous months
+```{r}
+US.AUexchangerate %>% 
+  filter(year(observation_date)>=1971) %>% 
+  gg_lag(EXUSAL, geom ="point")
+```
+
+Overall, a strong linear relationship at all lags, meaning the exchange rate should have reversive behaviour.
+
+What about from the last ten years and onwards?
+```{r}
+US.AUexchangerate %>% 
+  filter(year(observation_date)>=2014) %>% 
+  gg_lag(EXUSAL, geom = "point")
+```
+
+In the last 10 years, there is less of a positive relation with lagged versions.
+
+Let's look at the autocorrelation function of the time series from the last 20 years
+```{r}
+recent.exchange = US.AUexchangerate %>% 
+  filter(year(observation_date)>=2004)
+
+recent.exchange %>% 
+  ACF(EXUSAL, lag_max = 20) %>% 
+  autoplot()
+```
+
+As the lags increases, the ACF decays overtime due to the decreasing trend. Potentially no seasonality.
+
+Without the lag-max constraint:
+```{r}
+US.AUexchangerate %>% 
+  ACF(EXUSAL) %>% 
+  autoplot()
+```
+
+Same story as previously.
+
+How about the subseries plot just to make sure there is no seasonal pattern.
+```{r}
+US.AUexchangerate %>% 
+  gg_subseries(EXUSAL)
+```
+
+Similar means across the board. As a result, the series has no or minimal seasonality. Therefore, the series is not white noise.
+
+Performing a time-series decomposition
+```{r}
+decomposition = US.AUexchangerate %>% 
+  model(stl = STL(EXUSAL))
+
+components(decomposition) %>% 
+  autoplot()
+```
+
+It is now certain that there is a decreasing trend, and, no seasonality. There are dips during pre 1980, 2008 and 2020 indicating that the 1970s crash, 2008 GFC and the COVID lockdowns have leaked into the remainder component.
+
+Adding robust = TRUE to mitigate the effects of the 1970s crash, 2008 GFC and 2020 COVID lockdowns.
+```{r}
+decomposition = US.AUexchangerate %>% 
+  model(stl = STL(EXUSAL, robust = TRUE))
+
+components(decomposition) %>% 
+  autoplot()+
+  labs(title = "STL Decomposition with Robust Smoothing")
+```
+
+Decomposition reinforces the idea of no seasonality. The trend is a bit wiggly, but appears to have an overall downwards trend. Notably, the remainder component still has significant deviations despite the robust smoothing, indicating the effect of the economic shocks. Therefore, we should consider including the outliers in the model as it could explain the nature of exchange rate in forecasts.
+
+Due to cyclicity, let's fit an ARIMA model. First-order differencing since mean is not constant, but how many orders?
+
+Performing a KPSS test
+```{r}
+US.AUexchangerate %>% 
+  features(EXUSAL, unitroot_ndiffs)
+```
+
+One order difference is sufficient.
+
+Performing and plotting one order difference
+```{r, warning=FALSE}
+US.AUexchangerate %>% 
+  autoplot(difference(EXUSAL)) +
+  labs(y="US Dollar per Australian Dollar", x = "Year", title = "U.S. Dollars to Australian Dollar Spot Exchange Rate with first order differencing")
+```
+
+Extreme values due to economic shocks, but because of the sinusodial nature of the business cycle we'll keep in the outliers.
+
+
+ACF plot of differenced exchange rate
+```{r}
+US.AUexchangerate %>% 
+  ACF(difference(EXUSAL)) %>% 
+  autoplot()
+```
+
+2 extreme points at lag 1 and 12. Let's perform a KPSS test to test for stationarity.
+
+KPSS test comparison before and after differencing
+```{r}
+US.AUexchangerate %>% 
+  features(EXUSAL, unitroot_kpss)
+```
+
+P-value < 0.05 which reject the null hypothesis that the series is stationary and non-seasonal. 
+
+```{r}
+US.AUexchangerate %>% 
+  features(difference(EXUSAL), unitroot_kpss)
+```
+
+P-Value > 0.05 which fails to reject the null hypothesis that the series is stationary and non-seasonal
+
+Since observations of the exchange rate are correlated, let's use the ACF and PACF to determine some candidate models.
+```{r, warning=FALSE}
+US.AUexchangerate %>% 
+  gg_tsdisplay(difference(EXUSAL), plot_type = "partial")
+```
+
+The ACF shows a significant spike at lag 1, and then a damped sinusodial curve afterwards. Moreover, there is a significant spike at lag 1 in the PACF, but none beyond lag 2. I will not include a constant in all potential candidate models as first-order differencing is applied, and adding a non-zero constant would make long-term forecasts follow a straight line. Let's consider additional AR and MA terms in our candidate models incase it produces better forecasts.
+
+# Model Building
+
+Inspecting the candidate models
+```{r, warning=FALSE}
+fits = US.AUexchangerate %>% 
+  model(arima111 = ARIMA(EXUSAL~pdq(1,1,1)+ PDQ(0,0,0)), # From the diagnostics
+        arima211 = ARIMA(EXUSAL~pdq(2,1,1)+ PDQ(0,0,0)), # Lingering significance at lag 2
+        arima112 = ARIMA(EXUSAL~pdq(1,1,2)+ PDQ(0,0,0)), # ACF plot shows significance beyond the first lag
+        arima212 = ARIMA(EXUSAL~pdq(2,1,2)+ PDQ(0,0,0)), # Adding extra AR and MA terms in case of complexity
+        arima011 = ARIMA(EXUSAL~pdq(0,1,1)+ PDQ(0,0,0)), # Testing if AR terms are significant
+        arima110 = ARIMA(EXUSAL~pdq(1,1,0)+ PDQ(0,0,0)), # Testing if MA terms are significant
+        arimabaseline = ARIMA(EXUSAL~pdq(0,1,0)+ PDQ(0,0,0))) # Baseline model with no AR pr MA terms
+
+glance(fits) %>% 
+  arrange(AICc) %>% 
+  select(.model:BIC)
+```
+
+ARIMA(0,1,1) has the lowest BIC, AIC, and AICc. The difference between the Information Criterion for all the models are relatively small.
+
+Inspecting the ARIMA(0,1,1) model
+```{r}
+fits %>% 
+  select(arima011) %>% 
+  report()
+```
+
+Looking at the innovation residuals
+```{r}
+fits %>% 
+  select(arima011) %>% 
+  gg_tsresiduals()
+```
+
+Residuals seem to have a zero mean and are normally distributed.
+
+Performing a Ljung-Box test to see if the chosen model is autocorrelated at multiple lags.
+```{r}
+fits %>% 
+  select(arima011) %>% 
+  augment() %>% 
+  features(.resid, ljung_box, lag = 10)
+```
+
+P-Value > 0.05 which fails to reject the null hypothesis that the the residuals are independently distributed (no autocorrelation). Thus, the series is likely white noise.
+
+Forecasting using ARIMA(0,1,1) with 80% and 95% prediction intervals.
+```{r}
+fits %>% 
+  select(arima011) %>% 
+  forecast(h = 18) %>% #18 months
+  autoplot(US.AUexchangerate)
+```
+
+Wide intervals indicate greater uncertainty, which is common for long-term forecasts or highly volatile time series.
+
+However, exchange rates can be influenced by past rates due to exchange rate expectation, interest rate expectation, and anticipation of the business cycle which influences confidence and expectations. Therefore, let's consider a model with at least 1 autoregressive term that captures the economic effects. Despite the BIC ranking from the candidate models, an AR term seems reasonable to include based on the PACF of the differenced series.
+
+Let's consider at least 1 autoregressive term.
+
+Picking the model with minimal errors
+```{r}
+fits %>% 
+  accuracy() %>% 
+  arrange(MAE)
+```
+
+ARIMA(2,1,2) has the lowest MAE and RMSE after ARIMA(0,1,1) which are the most commonly used errors. The difference in AIC between the candidate are quite small. The log-Likelihood is also similar between the candidate models. Including the AR(2) terms enable us to better capture the effects of past exchange rates to produce better forecasts. Moreover, the MA(2) terms enable us to utilise past forecast errors to produce better forecasts as well. Since the USD/AUD exchange adjust via the business cycle and adjust through expectations, using AR and MA terms is appropiate as economies grow and shrink.
+
+What about the ARIMA(2,1,2) model?
+```{r}
+#Building the ARIMA(2,1,2) model
+arima212 = US.AUexchangerate %>% 
+  model(ARIMA(EXUSAL~pdq(2,1,2)+PDQ(0,0,0)))
+```
+
+Is the difference in AIC significant? ARIMA(1,1,1) is a subset of ARIMA(2,1,2) and thus are nested models. Thus, we can perform a likehood ratio test to determine if the difference in parameters make a difference.
+
+Performing a Likelihood Ratio Test
+```{r}
+# Extract the log-likelihood values
+log_likelihood_null = fits %>%
+  select(arima111) %>% 
+  glance() %>%  #Null model is ARIMA(1,1,1)
+  select(log_lik) %>% 
+  as.numeric()
+  
+log_likelihood_alt = glance(arima212) %>% #Alternative model is ARIMA(2,1,2)
+  select(log_lik) %>% 
+  as.numeric()
+# Compute the likelihood ratio test statistic
+lr_statistic = -2 * (log_likelihood_null - log_likelihood_alt)
+
+# Degrees of freedom: difference in number of parameters
+df = length(coef(arima212)) - length(coef(fits %>%
+  select(arima111)))
+
+# Compute the p-value (Chi-squared distribution)
+p_value = pchisq(lr_statistic, df, lower.tail = FALSE)
+```
+
+```{r}
+print(p_value)
+```
+P-Value < 0.05 which rejects the null hypothesis and conclude that the alternative model (ARIMA(2,1,2)) provides a better fit
+
+Looking at ARIMA(2,1,2) model's innovation residuals, ACF, and distribution of residuals.
+```{r}
+arima212 %>% 
+  gg_tsresiduals()
+```
+
+Residuals are close to 0 and appear normally However, there are some outliers (due to economic shocks) which will be included as part of understanding the business cycle or policy changes.
+
+Performing a Ljung-Box test to see if the chosen model is autocorrelated at multiple lags.
+```{r}
+arima212 %>% 
+  augment() %>% 
+  features(.resid, ljung_box, lag = 10)
+```
+
+This is the probability of observing the test statistic under the Chi-squared distribution. P-Value > 0.05 which fails to reject the null hypothesis that the the residuals are independently distributed (no autocorrelation). Thus, the series is likely white noise.
+
+Inspecting the coefficients
+```{r}
+arima212 %>% 
+  report()
+```
+
+# Final model
+
+The general model is: $(1-$$\phi_1$$B$-$\phi_2$$B^2$$)$$(1-B)$$y_t$ = $(1+$$\theta_1$B+$\theta_2$$B^2$)$\epsilon_t$
+
+The model is: $(1-$$0.55$$B$+$0.13$$B^2$$)$$(1-B)$$USD/AUD_t$ = $(1-$$0.19$$B-$$0.03$$B^2$)$\epsilon_t$
+
+Forecasting using ARIMA(2,1,2) with 80% and 95% prediction intervals.
+```{r}
+arima212 %>% 
+  forecast(h = 18, bootstrap = FALSE) %>% #h = 18 indicates 18 months
+  autoplot(US.AUexchangerate) + 
+  labs(y="US Dollar per Australian Dollar", x = "Year", title = "U.S. Dollars to Australian Dollar Spot Exchange Rate + Forecast")
+```
+
+Therefore, we know where the exchange rate is forecasted to be within the 18 months based on the ARIMA(2,1,2) model. At around the max point of the 95% predictive interval, the exchange rate is just below 0.9 which would indicate a depreciation of the USD against the AUD. At the lowest portion of the 95% predictive interval, the exchange rate is around 0.44 which would indicate a appreciation of the USD against the USD.
+
+Decision making should be based on interest rate differential forecasts as well.
