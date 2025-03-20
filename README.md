@@ -1,2 +1,2 @@
 # README
-Files associated with my project: [Time Series forecasting of the USD/AUD exchange rate](https://rpubs.com/aidatasci/timeseriesforecast)
+Files associated with my project: [Exchange Dynamics: Forecasting USD/AUD with Time Series Modelling](https://rpubs.com/aidatasci/timeseriesforecast)
